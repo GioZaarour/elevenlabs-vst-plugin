@@ -127,11 +127,16 @@ juce::AudioProcessorEditor* PluginProcessor::createEditor()
 
 void PluginProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
+    // Generate instance UUID if not set
+    if (instanceUuid.isEmpty())
+        instanceUuid = juce::Uuid().toString();
+
     StateSerializer::PluginState state;
     state.prompt = currentPrompt;
     state.genre = currentGenre;
     state.durationMs = currentDurationMs;
     state.cachedAudioPath = currentCachedPath;
+    state.instanceUuid = instanceUuid;
 
     stateSerializer.savePluginState(destData, state);
 }
@@ -144,6 +149,12 @@ void PluginProcessor::setStateInformation(const void* data, int sizeInBytes)
     currentGenre = state.genre;
     currentDurationMs = state.durationMs;
     currentCachedPath = state.cachedAudioPath;
+
+    // Load or generate instance UUID
+    if (state.instanceUuid.isNotEmpty())
+        instanceUuid = state.instanceUuid;
+    else
+        instanceUuid = juce::Uuid().toString();
 
     // Try to load cached audio
     if (currentCachedPath.isNotEmpty())
@@ -158,6 +169,10 @@ void PluginProcessor::startGeneration(const juce::String& prompt, const juce::St
     currentGenre = genre;
     currentDurationMs = durationMs;
 
+    // Ensure we have an instance UUID
+    if (instanceUuid.isEmpty())
+        instanceUuid = juce::Uuid().toString();
+
     // Save preferences
     stateSerializer.setLastGenre(genre);
     stateSerializer.setLastDuration(durationMs);
@@ -168,19 +183,20 @@ void PluginProcessor::startGeneration(const juce::String& prompt, const juce::St
     request.durationMs = durationMs;
 
     juce::String apiKey = stateSerializer.getApiKey();
+    juce::String projectUuid = instanceUuid;
 
     apiClient.generateMusic(
         apiKey,
         request,
-        [this, prompt, genre, durationMs](const ApiClient::GenerationResult& result)
+        [this, prompt, genre, durationMs, projectUuid](const ApiClient::GenerationResult& result)
         {
             if (result.success)
             {
                 notifyStatus("Processing audio...");
 
-                // Cache the audio
+                // Cache the audio with project UUID
                 juce::String cachedPath = cacheManager.cacheAudio(
-                    result.audioData, prompt, genre, durationMs);
+                    result.audioData, prompt, genre, durationMs, projectUuid);
 
                 if (cachedPath.isNotEmpty())
                 {
@@ -273,6 +289,13 @@ void PluginProcessor::loadAudioFromCache(const juce::String& filePath)
 bool PluginProcessor::hasAudio() const
 {
     return currentBuffer != nullptr && currentBuffer->buffer != nullptr;
+}
+
+juce::AudioBuffer<float>* PluginProcessor::getAudioBuffer() const
+{
+    if (currentBuffer != nullptr && currentBuffer->buffer != nullptr)
+        return currentBuffer->buffer.get();
+    return nullptr;
 }
 
 void PluginProcessor::setStatusCallback(StatusCallback callback)

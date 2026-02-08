@@ -3,6 +3,15 @@
 //==============================================================================
 // WaveformDisplay
 //==============================================================================
+PluginEditor::WaveformDisplay::WaveformDisplay()
+{
+}
+
+PluginEditor::WaveformDisplay::~WaveformDisplay()
+{
+    stopTimer();
+}
+
 void PluginEditor::WaveformDisplay::setAudioBuffer(juce::AudioBuffer<float>* buffer)
 {
     audioBuffer = buffer;
@@ -13,6 +22,76 @@ void PluginEditor::WaveformDisplay::setPlaybackPosition(double position)
 {
     playbackPos = position;
     repaint();
+}
+
+void PluginEditor::WaveformDisplay::setGenerating(bool generating)
+{
+    if (isGenerating != generating)
+    {
+        isGenerating = generating;
+        if (generating)
+        {
+            animationPhase = 0.0f;
+            startTimerHz(60);  // 60fps for smooth animation
+        }
+        else
+        {
+            stopTimer();
+        }
+        repaint();
+    }
+}
+
+void PluginEditor::WaveformDisplay::timerCallback()
+{
+    // Advance animation phase
+    animationPhase += 0.02f;
+    if (animationPhase > 1.0f)
+        animationPhase = 0.0f;
+    repaint();
+}
+
+void PluginEditor::WaveformDisplay::mouseDown(const juce::MouseEvent& event)
+{
+    mouseDownTime = juce::Time::currentTimeMillis();
+    isDragging = false;
+}
+
+void PluginEditor::WaveformDisplay::mouseUp(const juce::MouseEvent& event)
+{
+    if (!isDragging && audioBuffer != nullptr)
+    {
+        // This was a click (scrub) - calculate position
+        auto bounds = getLocalBounds().toFloat();
+        float width = bounds.getWidth() - 20.0f;
+        float clickX = static_cast<float>(event.x) - (bounds.getX() + 10.0f);
+        double position = juce::jlimit(0.0, 1.0, static_cast<double>(clickX / width));
+
+        if (onScrub)
+            onScrub(position);
+    }
+    isDragging = false;
+}
+
+void PluginEditor::WaveformDisplay::mouseDrag(const juce::MouseEvent& event)
+{
+    if (!isDragging && audioBuffer != nullptr && cachedFilePath.isNotEmpty())
+    {
+        juce::int64 elapsed = juce::Time::currentTimeMillis() - mouseDownTime;
+        if (elapsed >= kDragThresholdMs)
+        {
+            // Initiate drag
+            isDragging = true;
+
+            juce::File audioFile(cachedFilePath);
+            if (audioFile.existsAsFile())
+            {
+                juce::StringArray files;
+                files.add(cachedFilePath);
+                juce::DragAndDropContainer::performExternalDragDropOfFiles(files, false);
+            }
+        }
+    }
 }
 
 void PluginEditor::WaveformDisplay::paint(juce::Graphics& g)
@@ -26,6 +105,32 @@ void PluginEditor::WaveformDisplay::paint(juce::Graphics& g)
     // Border
     g.setColour(juce::Colour(Colors::primary));
     g.drawRoundedRectangle(bounds.reduced(1), 8.0f, 2.0f);
+
+    // Loading animation during generation
+    if (isGenerating)
+    {
+        // Draw horizontal gradient sweep
+        float width = bounds.getWidth() - 20.0f;
+        float gradientWidth = width * 0.3f;  // 30% of width
+        float gradientX = bounds.getX() + 10.0f + (width - gradientWidth) * animationPhase;
+
+        juce::ColourGradient gradient(
+            juce::Colour(Colors::accent).withAlpha(0.0f),
+            gradientX, bounds.getCentreY(),
+            juce::Colour(Colors::accent).withAlpha(0.5f),
+            gradientX + gradientWidth * 0.5f, bounds.getCentreY(),
+            false);
+        gradient.addColour(1.0, juce::Colour(Colors::accent).withAlpha(0.0f));
+
+        g.setGradientFill(gradient);
+        g.fillRoundedRectangle(bounds.reduced(2), 6.0f);
+
+        // Draw generating text
+        g.setColour(juce::Colour(Colors::text));
+        g.setFont(14.0f);
+        g.drawText("Generating...", bounds, juce::Justification::centred);
+        return;
+    }
 
     if (audioBuffer == nullptr || audioBuffer->getNumSamples() == 0)
     {
@@ -265,10 +370,28 @@ PluginEditor::SettingsDialog::SettingsDialog()
                                           juce::Colour(Colors::textMuted));
     addAndMakeVisible(apiKeyEditor);
 
+    historyScopeLabel.setColour(juce::Label::textColourId, juce::Colour(Colors::text));
+    addAndMakeVisible(historyScopeLabel);
+
+    historyScopeCombo.addItem("This Project", 1);
+    historyScopeCombo.addItem("All Projects", 2);
+    historyScopeCombo.setSelectedId(1);
+    addAndMakeVisible(historyScopeCombo);
+
+    clearCacheBtn.onClick = [this]()
+    {
+        if (onClearCacheCallback)
+            onClearCacheCallback();
+    };
+    addAndMakeVisible(clearCacheBtn);
+
     saveBtn.onClick = [this]()
     {
         if (onSaveCallback)
-            onSaveCallback(apiKeyEditor.getText());
+        {
+            bool showAll = (historyScopeCombo.getSelectedId() == 2);
+            onSaveCallback(apiKeyEditor.getText(), showAll);
+        }
         hide();
     };
     addAndMakeVisible(saveBtn);
@@ -286,12 +409,16 @@ PluginEditor::SettingsDialog::SettingsDialog()
 
 void PluginEditor::SettingsDialog::show(
     const juce::String& currentApiKey,
-    std::function<void(const juce::String&)> onSave,
-    std::function<void()> onCancel)
+    bool showAllSamples,
+    std::function<void(const juce::String&, bool)> onSave,
+    std::function<void()> onCancel,
+    std::function<void()> onClearCache)
 {
     apiKeyEditor.setText(currentApiKey, false);
+    historyScopeCombo.setSelectedId(showAllSamples ? 2 : 1, juce::dontSendNotification);
     onSaveCallback = std::move(onSave);
     onCancelCallback = std::move(onCancel);
+    onClearCacheCallback = std::move(onClearCache);
     visible = true;
     setVisible(true);
     apiKeyEditor.grabKeyboardFocus();
@@ -309,7 +436,7 @@ void PluginEditor::SettingsDialog::paint(juce::Graphics& g)
     g.fillAll(juce::Colours::black.withAlpha(0.7f));
 
     // Dialog background
-    auto dialogBounds = getLocalBounds().reduced(60, 120).toFloat();
+    auto dialogBounds = getLocalBounds().reduced(40, 80).toFloat();
     g.setColour(juce::Colour(Colors::surface));
     g.fillRoundedRectangle(dialogBounds, 12.0f);
 
@@ -325,14 +452,23 @@ void PluginEditor::SettingsDialog::paint(juce::Graphics& g)
 
 void PluginEditor::SettingsDialog::resized()
 {
-    auto bounds = getLocalBounds().reduced(80, 140);
+    auto bounds = getLocalBounds().reduced(60, 100);
 
     bounds.removeFromTop(40);  // Title space
 
     apiKeyLabel.setBounds(bounds.removeFromTop(25));
     apiKeyEditor.setBounds(bounds.removeFromTop(35));
 
-    bounds.removeFromTop(30);
+    bounds.removeFromTop(20);
+
+    historyScopeLabel.setBounds(bounds.removeFromTop(25));
+    historyScopeCombo.setBounds(bounds.removeFromTop(30));
+
+    bounds.removeFromTop(20);
+
+    clearCacheBtn.setBounds(bounds.removeFromTop(35).reduced(50, 0));
+
+    bounds.removeFromTop(20);
 
     auto buttonBounds = bounds.removeFromTop(40);
     const int buttonWidth = 100;
@@ -363,8 +499,24 @@ PluginEditor::PluginEditor(PluginProcessor& p)
         handleGenerationComplete(success, errorMsg);
     });
 
+    // History dropdown
+    historyDropdown.setTextWhenNothingSelected("Select sample...");
+    historyDropdown.onChange = [this]() { onHistorySelectionChanged(); };
+    addAndMakeVisible(historyDropdown);
+    populateHistoryDropdown();
+
     // Configure main controls
-    generateButton.onClick = [this]() { showGenerationDialog(); };
+    generateButton.onClick = [this]()
+    {
+        if (hasMissingAudio)
+        {
+            regenerateFromHistory(missingAudioEntry);
+        }
+        else
+        {
+            showGenerationDialog();
+        }
+    };
     addAndMakeVisible(generateButton);
 
     playButton.onClick = [this]()
@@ -389,7 +541,34 @@ PluginEditor::PluginEditor(PluginProcessor& p)
     settingsButton.onClick = [this]() { showSettingsDialog(); };
     addAndMakeVisible(settingsButton);
 
+    // Waveform display with scrub and drag support
+    waveformDisplay.onScrub = [this](double position)
+    {
+        double length = processor.getAudioLength();
+        if (length > 0)
+        {
+            processor.setPlaybackPosition(position * length);
+            waveformDisplay.setPlaybackPosition(position);
+        }
+    };
     addAndMakeVisible(waveformDisplay);
+
+    // Update waveform with cached file path if available
+    juce::String cachedPath = processor.getCurrentCachedPath();
+    if (cachedPath.isNotEmpty())
+    {
+        waveformDisplay.setCachedFilePath(cachedPath);
+        // Select matching history entry
+        for (int i = 0; i < historyEntries.size(); ++i)
+        {
+            if (historyEntries[i].audioFilePath == cachedPath)
+            {
+                historyDropdown.setSelectedId(i + 1, juce::dontSendNotification);
+                currentHistoryId = historyEntries[i].id;
+                break;
+            }
+        }
+    }
 
     statusLabel.setColour(juce::Label::textColourId, juce::Colour(Colors::textMuted));
     statusLabel.setJustificationType(juce::Justification::centred);
@@ -402,7 +581,10 @@ PluginEditor::PluginEditor(PluginProcessor& p)
     addChildComponent(generationDialog);
     addChildComponent(settingsDialog);
 
-    setSize(500, 350);
+    // Window sizing: min 400x350, default 500x450, resizable
+    setResizable(true, true);
+    setResizeLimits(400, 350, 1200, 900);
+    setSize(500, 450);
     startTimerHz(30);
 }
 
@@ -417,13 +599,17 @@ void PluginEditor::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(Colors::background));
 
+    // Scale based on window size
+    const float scale = juce::jmin(getWidth() / 500.0f, getHeight() / 450.0f);
+    const int headerHeight = static_cast<int>(50 * scale);
+
     // Header
-    auto headerBounds = getLocalBounds().removeFromTop(50).toFloat();
+    auto headerBounds = getLocalBounds().removeFromTop(headerHeight).toFloat();
     g.setColour(juce::Colour(Colors::surface));
     g.fillRect(headerBounds);
 
     g.setColour(juce::Colour(Colors::text));
-    g.setFont(20.0f);
+    g.setFont(20.0f * scale);
     g.drawText("ElevenLabs Music Generator", headerBounds,
                 juce::Justification::centred);
 }
@@ -431,30 +617,44 @@ void PluginEditor::paint(juce::Graphics& g)
 void PluginEditor::resized()
 {
     auto bounds = getLocalBounds();
+    const float scale = juce::jmin(bounds.getWidth() / 500.0f, bounds.getHeight() / 450.0f);
 
-    // Header
-    bounds.removeFromTop(50);
+    // Header - proportional height
+    const int headerHeight = static_cast<int>(50 * scale);
+    bounds.removeFromTop(headerHeight);
 
-    // Main content with padding
-    bounds = bounds.reduced(20);
+    // Main content with proportional padding
+    const int padding = static_cast<int>(20 * scale);
+    bounds = bounds.reduced(padding);
 
-    // Waveform display
-    waveformDisplay.setBounds(bounds.removeFromTop(150));
+    // History dropdown - fixed height, proportional spacing
+    const int dropdownHeight = static_cast<int>(28 * scale);
+    historyDropdown.setBounds(bounds.removeFromTop(dropdownHeight));
+    bounds.removeFromTop(static_cast<int>(10 * scale));
 
-    bounds.removeFromTop(15);
+    // Waveform display - takes available space minus controls
+    const int labelHeight = static_cast<int>(25 * scale);
+    const int buttonHeight = static_cast<int>(35 * scale);
+    const int bottomSpace = labelHeight * 2 + buttonHeight + static_cast<int>(35 * scale);
+    int waveformHeight = bounds.getHeight() - bottomSpace;
+    waveformHeight = juce::jmax(waveformHeight, static_cast<int>(100 * scale));
+    waveformDisplay.setBounds(bounds.removeFromTop(waveformHeight));
+
+    bounds.removeFromTop(static_cast<int>(15 * scale));
 
     // Status labels
-    statusLabel.setBounds(bounds.removeFromTop(25));
-    errorLabel.setBounds(bounds.removeFromTop(25));
+    statusLabel.setBounds(bounds.removeFromTop(labelHeight));
+    errorLabel.setBounds(bounds.removeFromTop(labelHeight));
 
-    bounds.removeFromTop(10);
+    bounds.removeFromTop(static_cast<int>(10 * scale));
 
-    // Control buttons
-    auto buttonRow = bounds.removeFromTop(35);
-    const int buttonWidth = 80;
-    const int spacing = 10;
+    // Control buttons - proportional sizing
+    auto buttonRow = bounds.removeFromTop(buttonHeight);
+    const int buttonWidth = static_cast<int>(80 * scale);
+    const int generateWidth = static_cast<int>(100 * scale);
+    const int spacing = static_cast<int>(10 * scale);
 
-    generateButton.setBounds(buttonRow.removeFromLeft(100));
+    generateButton.setBounds(buttonRow.removeFromLeft(generateWidth));
     buttonRow.removeFromLeft(spacing);
 
     playButton.setBounds(buttonRow.removeFromLeft(buttonWidth));
@@ -479,6 +679,11 @@ void PluginEditor::timerCallback()
     // Update waveform if we have audio
     if (processor.hasAudio())
     {
+        // Ensure waveform has the audio buffer (handles initial load from cache)
+        auto* buffer = processor.getAudioBuffer();
+        if (buffer != nullptr && waveformDisplay.getAudioBuffer() != buffer)
+            waveformDisplay.setAudioBuffer(buffer);
+
         double length = processor.getAudioLength();
         if (length > 0)
         {
@@ -488,17 +693,127 @@ void PluginEditor::timerCallback()
     }
 
     // Update generating state
+    bool wasGenerating = isGenerating;
     isGenerating = processor.isGenerating();
+
+    // Trigger animation repaint during generation
+    if (isGenerating)
+        waveformDisplay.setGenerating(true);
+    else if (wasGenerating && !isGenerating)
+        waveformDisplay.setGenerating(false);
+
     generateButton.setEnabled(!isGenerating);
 
     if (isGenerating)
     {
         generateButton.setButtonText("Generating...");
     }
+    else if (hasMissingAudio)
+    {
+        generateButton.setButtonText("Regenerate");
+    }
     else
     {
         generateButton.setButtonText("Generate New");
     }
+}
+
+void PluginEditor::populateHistoryDropdown()
+{
+    historyDropdown.clear();
+
+    // Get history based on scope setting
+    bool showAll = processor.getStateSerializer().getShowAllSamples();
+    if (showAll)
+    {
+        historyEntries = processor.getCacheManager().getHistory();
+    }
+    else
+    {
+        juce::String projectUuid = processor.getInstanceUuid();
+        historyEntries = processor.getCacheManager().getHistoryForProject(projectUuid);
+    }
+
+    // Sort by timestamp descending (most recent first)
+    std::sort(historyEntries.begin(), historyEntries.end(),
+              [](const AudioCacheManager::HistoryEntry& a, const AudioCacheManager::HistoryEntry& b)
+              {
+                  return a.timestamp > b.timestamp;
+              });
+
+    for (int i = 0; i < historyEntries.size(); ++i)
+    {
+        const auto& entry = historyEntries[i];
+
+        // Format: "Genre (Duration) - Date"
+        int durationSec = entry.durationMs / 1000;
+        juce::String dateStr = entry.timestamp.toString(true, false);  // Date only
+
+        juce::String itemText = entry.genre + " (" + juce::String(durationSec) + "s) - " + dateStr;
+        historyDropdown.addItem(itemText, i + 1);  // IDs start at 1
+    }
+}
+
+void PluginEditor::onHistorySelectionChanged()
+{
+    int selectedIdx = historyDropdown.getSelectedId() - 1;
+    if (selectedIdx >= 0 && selectedIdx < historyEntries.size())
+    {
+        const auto& entry = historyEntries[selectedIdx];
+
+        // Check if audio file exists
+        juce::File audioFile(entry.audioFilePath);
+        if (!audioFile.existsAsFile())
+        {
+            // Audio missing - store entry for potential regeneration
+            missingAudioEntry = entry;
+            hasMissingAudio = true;
+            errorLabel.setText("Sample missing. Regenerate?", juce::dontSendNotification);
+            statusLabel.setText("", juce::dontSendNotification);
+            generateButton.setButtonText("Regenerate");
+            waveformDisplay.setAudioBuffer(nullptr);
+            return;
+        }
+
+        // Clear missing audio state
+        hasMissingAudio = false;
+        generateButton.setButtonText("Generate New");
+
+        // Stop playback before loading new audio
+        processor.setPlaying(false);
+
+        // Load the cached audio
+        processor.loadAudioFromCache(entry.audioFilePath);
+
+        // Update waveform
+        waveformDisplay.setCachedFilePath(entry.audioFilePath);
+        waveformDisplay.setAudioBuffer(processor.getAudioBuffer());
+        waveformDisplay.setPlaybackPosition(0.0);
+
+        currentHistoryId = entry.id;
+
+        statusLabel.setText("Ready to play", juce::dontSendNotification);
+        errorLabel.setText("", juce::dontSendNotification);
+    }
+}
+
+void PluginEditor::regenerateFromHistory(const AudioCacheManager::HistoryEntry& entry)
+{
+    // Check if API key is set
+    juce::String apiKey = processor.getStateSerializer().getApiKey();
+    if (apiKey.isEmpty())
+    {
+        errorLabel.setText("Please set your API key in Settings first", juce::dontSendNotification);
+        showSettingsDialog();
+        return;
+    }
+
+    errorLabel.setText("", juce::dontSendNotification);
+    hasMissingAudio = false;
+    generateButton.setButtonText("Generating...");
+
+    // Use the exact same parameters from the history entry
+    processor.startGeneration(entry.prompt, entry.genre, entry.durationMs);
 }
 
 void PluginEditor::showGenerationDialog()
@@ -533,15 +848,28 @@ void PluginEditor::showGenerationDialog()
 void PluginEditor::showSettingsDialog()
 {
     juce::String currentKey = processor.getStateSerializer().getApiKey();
+    bool showAll = processor.getStateSerializer().getShowAllSamples();
 
     settingsDialog.show(
         currentKey,
-        [this](const juce::String& apiKey)
+        showAll,
+        [this](const juce::String& apiKey, bool showAllSamples)
         {
             processor.getStateSerializer().setApiKey(apiKey);
+            processor.getStateSerializer().setShowAllSamples(showAllSamples);
             errorLabel.setText("", juce::dontSendNotification);
+            // Refresh history dropdown with new scope
+            populateHistoryDropdown();
         },
-        []() { /* cancelled */ });
+        []() { /* cancelled */ },
+        [this]()
+        {
+            // Clear cache callback
+            processor.getCacheManager().clearCache();
+            populateHistoryDropdown();
+            waveformDisplay.setAudioBuffer(nullptr);
+            statusLabel.setText("Cache cleared", juce::dontSendNotification);
+        });
 }
 
 void PluginEditor::updatePlaybackState()
@@ -557,15 +885,36 @@ void PluginEditor::updatePlaybackState()
 void PluginEditor::handleGenerationComplete(bool success, const juce::String& errorMsg)
 {
     isGenerating = false;
+    hasMissingAudio = false;
+    generateButton.setButtonText("Generate New");
 
     if (success)
     {
         statusLabel.setText("Ready to play", juce::dontSendNotification);
         errorLabel.setText("", juce::dontSendNotification);
 
-        // Update waveform with new audio
-        // Note: We'd need to expose the buffer properly for this
-        // For now, the timer callback will update the playback position
+        // Update waveform with new audio buffer and cached path
+        juce::String cachedPath = processor.getCurrentCachedPath();
+        waveformDisplay.setCachedFilePath(cachedPath);
+        waveformDisplay.setAudioBuffer(processor.getAudioBuffer());
+        waveformDisplay.setPlaybackPosition(0.0);
+
+        // Refresh history dropdown and select the new entry
+        populateHistoryDropdown();
+
+        // Find and select the new entry (should be first since sorted by timestamp desc)
+        if (!historyEntries.isEmpty())
+        {
+            for (int i = 0; i < historyEntries.size(); ++i)
+            {
+                if (historyEntries[i].audioFilePath == cachedPath)
+                {
+                    historyDropdown.setSelectedId(i + 1, juce::dontSendNotification);
+                    currentHistoryId = historyEntries[i].id;
+                    break;
+                }
+            }
+        }
     }
     else
     {

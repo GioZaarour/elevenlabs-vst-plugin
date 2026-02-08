@@ -26,6 +26,7 @@ public:
         int durationMs = 0;
         juce::String audioFilePath;
         juce::Time timestamp;
+        juce::String projectUuid;  // UUID of the plugin instance that created this
     };
 
     // Save MP3 data to cache, converting to WAV
@@ -33,7 +34,8 @@ public:
     juce::String cacheAudio(const juce::MemoryBlock& mp3Data,
                              const juce::String& prompt,
                              const juce::String& genre,
-                             int durationMs);
+                             int durationMs,
+                             const juce::String& projectUuid = {});
 
     // Load cached audio as an AudioBuffer
     std::unique_ptr<juce::AudioBuffer<float>> loadCachedAudio(const juce::String& filePath,
@@ -44,6 +46,7 @@ public:
 
     // History management
     juce::Array<HistoryEntry> getHistory() const;
+    juce::Array<HistoryEntry> getHistoryForProject(const juce::String& projectUuid) const;
     void clearHistory();
     void removeHistoryEntry(const juce::String& id);
 

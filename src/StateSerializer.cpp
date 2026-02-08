@@ -107,6 +107,23 @@ int StateSerializer::getLastDuration() const
     return globalConfig.getProperty("lastDurationMs", 30000);
 }
 
+void StateSerializer::setShowAllSamples(bool showAll)
+{
+    juce::ScopedLock lock(configLock);
+
+    if (auto* obj = globalConfig.getDynamicObject())
+    {
+        obj->setProperty("showAllSamples", showAll);
+        saveGlobalConfig();
+    }
+}
+
+bool StateSerializer::getShowAllSamples() const
+{
+    juce::ScopedLock lock(configLock);
+    return globalConfig.getProperty("showAllSamples", false);
+}
+
 void StateSerializer::savePluginState(juce::MemoryBlock& destData, const PluginState& state)
 {
     juce::DynamicObject::Ptr stateObj = new juce::DynamicObject();
@@ -116,6 +133,7 @@ void StateSerializer::savePluginState(juce::MemoryBlock& destData, const PluginS
     stateObj->setProperty("durationMs", state.durationMs);
     stateObj->setProperty("cachedAudioPath", state.cachedAudioPath);
     stateObj->setProperty("generationId", state.generationId);
+    stateObj->setProperty("instanceUuid", state.instanceUuid);
 
     auto json = juce::JSON::toString(juce::var(stateObj.get()), false);
     destData.append(json.toRawUTF8(), json.getNumBytesAsUTF8());
@@ -138,6 +156,7 @@ StateSerializer::PluginState StateSerializer::loadPluginState(const void* data, 
         state.durationMs = parsed.getProperty("durationMs", 30000);
         state.cachedAudioPath = parsed.getProperty("cachedAudioPath", "").toString();
         state.generationId = parsed.getProperty("generationId", "").toString();
+        state.instanceUuid = parsed.getProperty("instanceUuid", "").toString();
     }
 
     return state;

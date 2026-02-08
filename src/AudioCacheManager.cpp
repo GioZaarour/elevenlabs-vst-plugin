@@ -33,7 +33,8 @@ juce::String AudioCacheManager::generateUniqueId() const
 juce::String AudioCacheManager::cacheAudio(const juce::MemoryBlock& mp3Data,
                                             const juce::String& prompt,
                                             const juce::String& genre,
-                                            int durationMs)
+                                            int durationMs,
+                                            const juce::String& projectUuid)
 {
     // Create a memory input stream from the MP3 data
     auto inputStream = std::make_unique<juce::MemoryInputStream>(mp3Data, false);
@@ -120,6 +121,7 @@ juce::String AudioCacheManager::cacheAudio(const juce::MemoryBlock& mp3Data,
     entry.durationMs = durationMs;
     entry.audioFilePath = wavFile.getFullPathName();
     entry.timestamp = juce::Time::getCurrentTime();
+    entry.projectUuid = projectUuid;
 
     {
         juce::ScopedLock lock(historyLock);
@@ -190,6 +192,23 @@ juce::Array<AudioCacheManager::HistoryEntry> AudioCacheManager::getHistory() con
 {
     juce::ScopedLock lock(historyLock);
     return history;
+}
+
+juce::Array<AudioCacheManager::HistoryEntry> AudioCacheManager::getHistoryForProject(
+    const juce::String& projectUuid) const
+{
+    juce::ScopedLock lock(historyLock);
+
+    if (projectUuid.isEmpty())
+        return history;
+
+    juce::Array<HistoryEntry> filtered;
+    for (const auto& entry : history)
+    {
+        if (entry.projectUuid == projectUuid)
+            filtered.add(entry);
+    }
+    return filtered;
 }
 
 void AudioCacheManager::clearHistory()
@@ -277,6 +296,7 @@ void AudioCacheManager::loadHistory()
             entry.audioFilePath = item.getProperty("audioFilePath", "").toString();
             entry.timestamp = juce::Time(static_cast<juce::int64>(
                 item.getProperty("timestamp", 0)));
+            entry.projectUuid = item.getProperty("projectUuid", "").toString();
 
             // Only add if the audio file still exists
             if (juce::File(entry.audioFilePath).existsAsFile())
@@ -298,6 +318,7 @@ void AudioCacheManager::saveHistory()
         obj->setProperty("durationMs", entry.durationMs);
         obj->setProperty("audioFilePath", entry.audioFilePath);
         obj->setProperty("timestamp", entry.timestamp.toMilliseconds());
+        obj->setProperty("projectUuid", entry.projectUuid);
 
         arr.add(juce::var(obj.get()));
     }
