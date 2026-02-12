@@ -61,6 +61,11 @@ public:
     // Audio buffer management
     void loadAudioFromCache(const juce::String& filePath);
     bool hasAudio() const;
+    juce::String getCurrentCachedPath() const { return currentCachedPath; }
+
+    // Thread-safe buffer access for UI (copies data to avoid dangling pointers)
+    bool copyAudioBufferTo(juce::AudioBuffer<float>& dest) const;
+    int getBufferVersion() const { return bufferVersion.load(); }
 
     // Status and callbacks
     using StatusCallback = std::function<void(const juce::String&)>;
@@ -77,6 +82,7 @@ public:
     juce::String getCurrentPrompt() const { return currentPrompt; }
     juce::String getCurrentGenre() const { return currentGenre; }
     int getCurrentDurationMs() const { return currentDurationMs; }
+    juce::String getInstanceUuid() const { return instanceUuid; }
 
 private:
     // Thread-safe audio buffer wrapper
@@ -98,7 +104,8 @@ private:
     // Audio buffer (accessed from audio thread)
     std::shared_ptr<AudioBufferRef> currentBuffer;
     std::atomic<AudioBufferRef*> pendingBuffer{nullptr};
-    juce::SpinLock bufferLock;
+    mutable juce::SpinLock bufferLock;
+    std::atomic<int> bufferVersion{0};
 
     // Playback state
     std::atomic<bool> playing{false};
@@ -111,6 +118,7 @@ private:
     juce::String currentGenre;
     int currentDurationMs = 30000;
     juce::String currentCachedPath;
+    juce::String instanceUuid;  // Unique ID for this plugin instance
 
     // Callbacks
     StatusCallback statusCallback;

@@ -10,7 +10,8 @@
  * - Settings panel for API key configuration
  */
 class PluginEditor : public juce::AudioProcessorEditor,
-                      public juce::Timer
+                      public juce::Timer,
+                      public juce::DragAndDropContainer
 {
 public:
     explicit PluginEditor(PluginProcessor&);
@@ -37,18 +38,51 @@ private:
         static constexpr juce::uint32 waveform = 0xFF0F3460;
     };
 
-    // Waveform display component
-    class WaveformDisplay : public juce::Component
+    // Waveform display component with loading animation and drag support
+    class WaveformDisplay : public juce::Component,
+                            public juce::Timer
     {
     public:
-        void setAudioBuffer(juce::AudioBuffer<float>* buffer);
+        WaveformDisplay();
+        ~WaveformDisplay() override;
+
+        void setAudioBuffer(const juce::AudioBuffer<float>* buffer);
+        void clearAudioBuffer();
+        bool hasBuffer() const { return hasAudioData; }
         void setPlaybackPosition(double position);  // 0.0 - 1.0
+        void setGenerating(bool generating);
+        void setCachedFilePath(const juce::String& path) { cachedFilePath = path; }
+
         void paint(juce::Graphics&) override;
+        void timerCallback() override;
+
+        // Mouse handling for scrub and drag
+        void mouseDown(const juce::MouseEvent& event) override;
+        void mouseUp(const juce::MouseEvent& event) override;
+        void mouseDrag(const juce::MouseEvent& event) override;
+
+        // Callbacks
+        std::function<void(double)> onScrub;  // Called with position 0.0-1.0
+        std::function<void()> onDragStarted;
 
     private:
-        juce::AudioBuffer<float>* audioBuffer = nullptr;
+        juce::AudioBuffer<float> audioBufferCopy;
+        bool hasAudioData = false;
         double playbackPos = 0.0;
+        bool isGenerating = false;
+        float animationPhase = 0.0f;
+        juce::String cachedFilePath;
+
+        // Drag detection
+        juce::int64 mouseDownTime = 0;
+        bool isDragging = false;
+        static constexpr juce::int64 kDragThresholdMs = 300;
     };
+
+    // History dropdown
+    juce::ComboBox historyDropdown;
+    void populateHistoryDropdown();
+    void onHistorySelectionChanged();
 
     // Main controls
     juce::TextButton generateButton{"Generate New"};
@@ -99,8 +133,10 @@ private:
         SettingsDialog();
 
         void show(const juce::String& currentApiKey,
-                   std::function<void(const juce::String& apiKey)> onSave,
-                   std::function<void()> onCancel);
+                   bool showAllSamples,
+                   std::function<void(const juce::String& apiKey, bool showAllSamples)> onSave,
+                   std::function<void()> onCancel,
+                   std::function<void()> onClearCache);
         void hide();
         bool isVisible() const { return visible; }
 
@@ -112,11 +148,15 @@ private:
 
         juce::Label apiKeyLabel{"", "API Key:"};
         juce::TextEditor apiKeyEditor;
+        juce::Label historyScopeLabel{"", "Show samples from:"};
+        juce::ComboBox historyScopeCombo;
+        juce::TextButton clearCacheBtn{"Clear Cache"};
         juce::TextButton saveBtn{"Save"};
         juce::TextButton cancelBtn{"Cancel"};
 
-        std::function<void(const juce::String&)> onSaveCallback;
+        std::function<void(const juce::String&, bool)> onSaveCallback;
         std::function<void()> onCancelCallback;
+        std::function<void()> onClearCacheCallback;
     };
 
     GenerationDialog generationDialog;
@@ -126,11 +166,19 @@ private:
     bool isGenerating = false;
     juce::String currentStatus;
     juce::String currentError;
+    juce::String currentHistoryId;
+    juce::Array<AudioCacheManager::HistoryEntry> historyEntries;
+    int lastBufferVersion = -1;
 
     void showGenerationDialog();
     void showSettingsDialog();
     void updatePlaybackState();
     void handleGenerationComplete(bool success, const juce::String& errorMsg);
+    void regenerateFromHistory(const AudioCacheManager::HistoryEntry& entry);
+
+    // Missing audio state
+    AudioCacheManager::HistoryEntry missingAudioEntry;
+    bool hasMissingAudio = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginEditor)
 };

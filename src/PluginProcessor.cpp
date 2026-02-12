@@ -106,6 +106,7 @@ void PluginProcessor::swapInPendingBuffer()
         {
             currentBuffer = std::shared_ptr<AudioBufferRef>(pending);
             playbackPosition.store(0);
+            bufferVersion.fetch_add(1);
         }
         else
         {
@@ -127,11 +128,16 @@ juce::AudioProcessorEditor* PluginProcessor::createEditor()
 
 void PluginProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
+    // Generate instance UUID if not set
+    if (instanceUuid.isEmpty())
+        instanceUuid = juce::Uuid().toString();
+
     StateSerializer::PluginState state;
     state.prompt = currentPrompt;
     state.genre = currentGenre;
     state.durationMs = currentDurationMs;
     state.cachedAudioPath = currentCachedPath;
+    state.instanceUuid = instanceUuid;
 
     stateSerializer.savePluginState(destData, state);
 }
@@ -144,6 +150,12 @@ void PluginProcessor::setStateInformation(const void* data, int sizeInBytes)
     currentGenre = state.genre;
     currentDurationMs = state.durationMs;
     currentCachedPath = state.cachedAudioPath;
+
+    // Load or generate instance UUID
+    if (state.instanceUuid.isNotEmpty())
+        instanceUuid = state.instanceUuid;
+    else
+        instanceUuid = juce::Uuid().toString();
 
     // Try to load cached audio
     if (currentCachedPath.isNotEmpty())
@@ -158,6 +170,10 @@ void PluginProcessor::startGeneration(const juce::String& prompt, const juce::St
     currentGenre = genre;
     currentDurationMs = durationMs;
 
+    // Ensure we have an instance UUID
+    if (instanceUuid.isEmpty())
+        instanceUuid = juce::Uuid().toString();
+
     // Save preferences
     stateSerializer.setLastGenre(genre);
     stateSerializer.setLastDuration(durationMs);
@@ -168,19 +184,20 @@ void PluginProcessor::startGeneration(const juce::String& prompt, const juce::St
     request.durationMs = durationMs;
 
     juce::String apiKey = stateSerializer.getApiKey();
+    juce::String projectUuid = instanceUuid;
 
     apiClient.generateMusic(
         apiKey,
         request,
-        [this, prompt, genre, durationMs](const ApiClient::GenerationResult& result)
+        [this, prompt, genre, durationMs, projectUuid](const ApiClient::GenerationResult& result)
         {
             if (result.success)
             {
                 notifyStatus("Processing audio...");
 
-                // Cache the audio
+                // Cache the audio with project UUID
                 juce::String cachedPath = cacheManager.cacheAudio(
-                    result.audioData, prompt, genre, durationMs);
+                    result.audioData, prompt, genre, durationMs, projectUuid);
 
                 if (cachedPath.isNotEmpty())
                 {
@@ -247,7 +264,11 @@ double PluginProcessor::getPlaybackPosition() const
 
 double PluginProcessor::getAudioLength() const
 {
-    auto bufRef = currentBuffer;
+    std::shared_ptr<AudioBufferRef> bufRef;
+    {
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        bufRef = currentBuffer;
+    }
     if (bufRef == nullptr || bufRef->buffer == nullptr)
         return 0.0;
 
@@ -272,7 +293,25 @@ void PluginProcessor::loadAudioFromCache(const juce::String& filePath)
 
 bool PluginProcessor::hasAudio() const
 {
+    juce::SpinLock::ScopedLockType lock(bufferLock);
     return currentBuffer != nullptr && currentBuffer->buffer != nullptr;
+}
+
+bool PluginProcessor::copyAudioBufferTo(juce::AudioBuffer<float>& dest) const
+{
+    // Briefly lock to safely copy the shared_ptr (keeps buffer alive)
+    std::shared_ptr<AudioBufferRef> bufRef;
+    {
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        bufRef = currentBuffer;
+    }
+    // Copy audio data without holding the lock
+    if (bufRef != nullptr && bufRef->buffer != nullptr && bufRef->buffer->getNumSamples() > 0)
+    {
+        dest.makeCopyOf(*bufRef->buffer);
+        return true;
+    }
+    return false;
 }
 
 void PluginProcessor::setStatusCallback(StatusCallback callback)

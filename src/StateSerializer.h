@@ -32,7 +32,12 @@ public:
         int durationMs = 30000;
         juce::String cachedAudioPath;  // Path to cached audio file
         juce::String generationId;     // For history tracking
+        juce::String instanceUuid;     // Unique ID for this plugin instance (for history scoping)
     };
+
+    // History scope setting (global)
+    void setShowAllSamples(bool showAll);
+    bool getShowAllSamples() const;
 
     void savePluginState(juce::MemoryBlock& destData, const PluginState& state);
     PluginState loadPluginState(const void* data, int sizeInBytes);
