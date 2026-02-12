@@ -106,6 +106,7 @@ void PluginProcessor::swapInPendingBuffer()
         {
             currentBuffer = std::shared_ptr<AudioBufferRef>(pending);
             playbackPosition.store(0);
+            bufferVersion.fetch_add(1);
         }
         else
         {
@@ -263,7 +264,11 @@ double PluginProcessor::getPlaybackPosition() const
 
 double PluginProcessor::getAudioLength() const
 {
-    auto bufRef = currentBuffer;
+    std::shared_ptr<AudioBufferRef> bufRef;
+    {
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        bufRef = currentBuffer;
+    }
     if (bufRef == nullptr || bufRef->buffer == nullptr)
         return 0.0;
 
@@ -288,14 +293,25 @@ void PluginProcessor::loadAudioFromCache(const juce::String& filePath)
 
 bool PluginProcessor::hasAudio() const
 {
+    juce::SpinLock::ScopedLockType lock(bufferLock);
     return currentBuffer != nullptr && currentBuffer->buffer != nullptr;
 }
 
-juce::AudioBuffer<float>* PluginProcessor::getAudioBuffer() const
+bool PluginProcessor::copyAudioBufferTo(juce::AudioBuffer<float>& dest) const
 {
-    if (currentBuffer != nullptr && currentBuffer->buffer != nullptr)
-        return currentBuffer->buffer.get();
-    return nullptr;
+    // Briefly lock to safely copy the shared_ptr (keeps buffer alive)
+    std::shared_ptr<AudioBufferRef> bufRef;
+    {
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        bufRef = currentBuffer;
+    }
+    // Copy audio data without holding the lock
+    if (bufRef != nullptr && bufRef->buffer != nullptr && bufRef->buffer->getNumSamples() > 0)
+    {
+        dest.makeCopyOf(*bufRef->buffer);
+        return true;
+    }
+    return false;
 }
 
 void PluginProcessor::setStatusCallback(StatusCallback callback)

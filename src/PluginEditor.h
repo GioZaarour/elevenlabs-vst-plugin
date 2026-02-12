@@ -46,8 +46,9 @@ private:
         WaveformDisplay();
         ~WaveformDisplay() override;
 
-        void setAudioBuffer(juce::AudioBuffer<float>* buffer);
-        juce::AudioBuffer<float>* getAudioBuffer() const { return audioBuffer; }
+        void setAudioBuffer(const juce::AudioBuffer<float>* buffer);
+        void clearAudioBuffer();
+        bool hasBuffer() const { return hasAudioData; }
         void setPlaybackPosition(double position);  // 0.0 - 1.0
         void setGenerating(bool generating);
         void setCachedFilePath(const juce::String& path) { cachedFilePath = path; }
@@ -65,7 +66,8 @@ private:
         std::function<void()> onDragStarted;
 
     private:
-        juce::AudioBuffer<float>* audioBuffer = nullptr;
+        juce::AudioBuffer<float> audioBufferCopy;
+        bool hasAudioData = false;
         double playbackPos = 0.0;
         bool isGenerating = false;
         float animationPhase = 0.0f;
@@ -166,6 +168,7 @@ private:
     juce::String currentError;
     juce::String currentHistoryId;
     juce::Array<AudioCacheManager::HistoryEntry> historyEntries;
+    int lastBufferVersion = -1;
 
     void showGenerationDialog();
     void showSettingsDialog();

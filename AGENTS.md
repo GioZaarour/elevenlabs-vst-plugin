@@ -33,12 +33,17 @@ This is a DAW plugin (VST3/AU) built with JUCE that generates music via the Elev
 - **Thread model**: Uses atomic pointer swap for buffer hot-swapping (no locks on audio thread)
 - Manages playback state (play/stop/loop/position)
 - Handles DAW state serialization (`getStateInformation`/`setStateInformation`)
+- **Instance UUID**: Each plugin instance is assigned a `juce::Uuid` (lazy-generated on first save or generation). Used to scope sample history per DAW project.
+- **Thread-safe buffer access for UI**: `copyAudioBufferTo()` briefly locks to copy the shared_ptr, then copies audio data without the lock. `bufferVersion` (atomic int, incremented on every buffer swap) lets the editor detect changes without polling the pointer.
 
 ### `src/PluginEditor.h/cpp`
-- JUCE GUI with custom components
-- `WaveformDisplay` - renders audio waveform with playback position
+- JUCE GUI with custom components; inherits `DragAndDropContainer` for drag-to-DAW support
+- **Resizable window**: min 400x350, default 500x450, max 1200x900; all layout uses proportional scaling (`scale = min(w/500, h/450)`)
+- `WaveformDisplay` - renders audio waveform with playback position indicator; has its own 60fps Timer for loading animation (gradient sweep); handles mouse events for click-to-scrub and hold-to-drag (300ms threshold). Stores its own `audioBufferCopy` (safe copy) instead of a raw pointer into the processor.
 - `GenerationDialog` - modal for prompt/genre/duration input
-- `SettingsDialog` - API key configuration
+- `SettingsDialog` - API key, history scope toggle ("This Project" / "All Projects"), and Clear Cache button
+- **History dropdown** (`ComboBox`) above waveform: shows past generations as "Genre (Duration) - Date", sorted newest-first. Scoped to current project by default (filtered by instance UUID), or all projects via settings.
+- **Missing audio recovery**: When a cached file no longer exists, the Generate button becomes "Regenerate" and re-uses the original prompt/genre/duration.
 - Colors defined in `Colors` struct
 
 ### `src/ApiClient.h/cpp`
@@ -52,11 +57,13 @@ This is a DAW plugin (VST3/AU) built with JUCE that generates music via the Elev
 - Converts MP3 (API response) → WAV (48kHz/24-bit)
 - Manages cache directory and history.json
 - Handles sample rate conversion with `LagrangeInterpolator`
+- **Per-project history**: Each `HistoryEntry` stores a `projectUuid` (set at generation time). `getHistoryForProject(uuid)` returns only entries for that project.
+- **Concurrent-safe history file**: Uses `juce::InterProcessLock` for history.json reads/writes (multiple plugin instances may run in different DAWs). Writes use atomic temp-file-then-rename.
 
 ### `src/StateSerializer.h/cpp`
 - Global config: `~/Library/Application Support/ElevenLabsVST/config.json`
-- Stores: API key, last genre, last duration
-- Per-instance state for DAW project save/restore
+- Stores: API key, last genre, last duration, `showAllSamples` (history scope toggle)
+- Per-instance state for DAW project save/restore, now includes `instanceUuid` for project-scoped history
 
 ## Thread Safety Rules
 
@@ -73,9 +80,25 @@ This is a DAW plugin (VST3/AU) built with JUCE that generates music via the Elev
    auto* pending = pendingBuffer.exchange(nullptr);
    if (pending) {
        SpinLock::ScopedTryLockType lock(bufferLock);
-       if (lock.isLocked()) currentBuffer = pending;
+       if (lock.isLocked()) {
+           currentBuffer = pending;
+           bufferVersion.fetch_add(1);  // Signal UI that buffer changed
+       }
    }
    ```
+
+4. **UI Buffer Access**: The editor uses `copyAudioBufferTo()` + `bufferVersion` to safely get audio data for waveform rendering. WaveformDisplay stores its own `audioBufferCopy` to avoid dangling pointers.
+
+## Per-Project Identity Model
+
+Each plugin instance has a stable UUID (`instanceUuid`) that persists across DAW sessions:
+- Generated lazily on first `getStateInformation()` or `startGeneration()`
+- Stored in DAW project state via `StateSerializer::PluginState`
+- Stamped on every `HistoryEntry.projectUuid` at generation time
+- Used by the history dropdown to show only samples created by this project ("This Project" scope, the default)
+- Users can switch to "All Projects" scope in Settings to see everything
+
+This means each DAW project's plugin instance sees its own history by default, while shared cache storage is used under the hood.
 
 ## Build Instructions
 
@@ -139,7 +162,11 @@ Body: { "prompt": "...", "duration_seconds": 30 }
 
 2. **Sample Rate Mismatch**: AudioCacheManager resamples to match DAW sample rate at load time
 
-3. **State Persistence**: Cached audio path stored in DAW project; if cache cleared, audio lost
+3. **State Persistence**: Cached audio path stored in DAW project; if cache cleared, audio lost (UI now detects this and offers one-click "Regenerate")
+
+4. **History File Contention**: Multiple DAW instances share `history.json`. The `InterProcessLock` prevents corruption but operations should be kept brief.
+
+5. **Drag-to-DAW**: Uses `performExternalDragDropOfFiles` with a 300ms hold threshold. Click = scrub, hold = drag. Requires `PluginEditor` to inherit `DragAndDropContainer`.
 
 ## Dependencies
 

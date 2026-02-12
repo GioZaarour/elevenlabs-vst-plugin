@@ -281,7 +281,16 @@ void AudioCacheManager::loadHistory()
     if (!historyFile.existsAsFile())
         return;
 
+    // Acquire inter-process lock for file-level safety across plugin instances
+    if (!historyFileLock.enter(2000))
+    {
+        DBG("Failed to acquire history file lock for reading");
+        return;
+    }
+
     auto content = historyFile.loadFileAsString();
+    historyFileLock.exit();
+
     auto parsed = juce::JSON::parse(content);
 
     if (auto* arr = parsed.getArray())
@@ -324,5 +333,18 @@ void AudioCacheManager::saveHistory()
     }
 
     auto json = juce::JSON::toString(juce::var(arr), true);
-    getHistoryFile().replaceWithText(json);
+
+    // Acquire inter-process lock for file-level safety across plugin instances
+    if (historyFileLock.enter(2000))
+    {
+        // Atomic write: write to temp file, then rename
+        auto tempFile = getHistoryFile().getSiblingFile(".history.json.tmp");
+        if (tempFile.replaceWithText(json))
+            tempFile.moveFileTo(getHistoryFile());
+        historyFileLock.exit();
+    }
+    else
+    {
+        DBG("Failed to acquire history file lock for writing");
+    }
 }

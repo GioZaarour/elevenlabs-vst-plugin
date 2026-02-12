@@ -68,6 +68,7 @@ private:
     juce::File cacheDirectory;
     juce::Array<HistoryEntry> history;
     juce::CriticalSection historyLock;
+    juce::InterProcessLock historyFileLock{"ElevenLabsVST_HistoryLock"};
 
     static constexpr double kDefaultSampleRate = 48000.0;
     static constexpr int kDefaultBitDepth = 24;

@@ -61,8 +61,11 @@ public:
     // Audio buffer management
     void loadAudioFromCache(const juce::String& filePath);
     bool hasAudio() const;
-    juce::AudioBuffer<float>* getAudioBuffer() const;
     juce::String getCurrentCachedPath() const { return currentCachedPath; }
+
+    // Thread-safe buffer access for UI (copies data to avoid dangling pointers)
+    bool copyAudioBufferTo(juce::AudioBuffer<float>& dest) const;
+    int getBufferVersion() const { return bufferVersion.load(); }
 
     // Status and callbacks
     using StatusCallback = std::function<void(const juce::String&)>;
@@ -101,7 +104,8 @@ private:
     // Audio buffer (accessed from audio thread)
     std::shared_ptr<AudioBufferRef> currentBuffer;
     std::atomic<AudioBufferRef*> pendingBuffer{nullptr};
-    juce::SpinLock bufferLock;
+    mutable juce::SpinLock bufferLock;
+    std::atomic<int> bufferVersion{0};
 
     // Playback state
     std::atomic<bool> playing{false};

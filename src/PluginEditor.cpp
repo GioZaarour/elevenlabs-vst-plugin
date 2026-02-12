@@ -12,9 +12,25 @@ PluginEditor::WaveformDisplay::~WaveformDisplay()
     stopTimer();
 }
 
-void PluginEditor::WaveformDisplay::setAudioBuffer(juce::AudioBuffer<float>* buffer)
+void PluginEditor::WaveformDisplay::setAudioBuffer(const juce::AudioBuffer<float>* buffer)
 {
-    audioBuffer = buffer;
+    if (buffer != nullptr && buffer->getNumSamples() > 0)
+    {
+        audioBufferCopy.makeCopyOf(*buffer);
+        hasAudioData = true;
+    }
+    else
+    {
+        audioBufferCopy.setSize(0, 0);
+        hasAudioData = false;
+    }
+    repaint();
+}
+
+void PluginEditor::WaveformDisplay::clearAudioBuffer()
+{
+    audioBufferCopy.setSize(0, 0);
+    hasAudioData = false;
     repaint();
 }
 
@@ -59,7 +75,7 @@ void PluginEditor::WaveformDisplay::mouseDown(const juce::MouseEvent& event)
 
 void PluginEditor::WaveformDisplay::mouseUp(const juce::MouseEvent& event)
 {
-    if (!isDragging && audioBuffer != nullptr)
+    if (!isDragging && hasAudioData)
     {
         // This was a click (scrub) - calculate position
         auto bounds = getLocalBounds().toFloat();
@@ -75,7 +91,7 @@ void PluginEditor::WaveformDisplay::mouseUp(const juce::MouseEvent& event)
 
 void PluginEditor::WaveformDisplay::mouseDrag(const juce::MouseEvent& event)
 {
-    if (!isDragging && audioBuffer != nullptr && cachedFilePath.isNotEmpty())
+    if (!isDragging && hasAudioData && cachedFilePath.isNotEmpty())
     {
         juce::int64 elapsed = juce::Time::currentTimeMillis() - mouseDownTime;
         if (elapsed >= kDragThresholdMs)
@@ -132,7 +148,7 @@ void PluginEditor::WaveformDisplay::paint(juce::Graphics& g)
         return;
     }
 
-    if (audioBuffer == nullptr || audioBuffer->getNumSamples() == 0)
+    if (!hasAudioData || audioBufferCopy.getNumSamples() == 0)
     {
         // No audio - show placeholder
         g.setColour(juce::Colour(Colors::textMuted));
@@ -142,8 +158,8 @@ void PluginEditor::WaveformDisplay::paint(juce::Graphics& g)
     }
 
     // Draw waveform
-    const int numSamples = audioBuffer->getNumSamples();
-    const int numChannels = audioBuffer->getNumChannels();
+    const int numSamples = audioBufferCopy.getNumSamples();
+    const int numChannels = audioBufferCopy.getNumChannels();
     const float width = bounds.getWidth() - 20;
     const float height = bounds.getHeight() - 20;
     const float centerY = bounds.getCentreY();
@@ -167,7 +183,7 @@ void PluginEditor::WaveformDisplay::paint(juce::Graphics& g)
         {
             for (int ch = 0; ch < numChannels; ++ch)
             {
-                float val = std::abs(audioBuffer->getSample(ch, sampleIndex + i));
+                float val = std::abs(audioBufferCopy.getSample(ch, sampleIndex + i));
                 maxVal = juce::jmax(maxVal, val);
             }
         }
@@ -197,7 +213,7 @@ void PluginEditor::WaveformDisplay::paint(juce::Graphics& g)
         {
             for (int ch = 0; ch < numChannels; ++ch)
             {
-                float val = std::abs(audioBuffer->getSample(ch, sampleIndex + i));
+                float val = std::abs(audioBufferCopy.getSample(ch, sampleIndex + i));
                 maxVal = juce::jmax(maxVal, val);
             }
         }
@@ -544,6 +560,9 @@ PluginEditor::PluginEditor(PluginProcessor& p)
     // Waveform display with scrub and drag support
     waveformDisplay.onScrub = [this](double position)
     {
+        if (!processor.hasAudio())
+            return;
+
         double length = processor.getAudioLength();
         if (length > 0)
         {
@@ -590,6 +609,8 @@ PluginEditor::PluginEditor(PluginProcessor& p)
 
 PluginEditor::~PluginEditor()
 {
+    // Stop waveform animation timer before child components are destroyed
+    waveformDisplay.stopTimer();
     stopTimer();
     processor.setStatusCallback(nullptr);
     processor.setGenerationCompleteCallback(nullptr);
@@ -676,14 +697,21 @@ void PluginEditor::timerCallback()
 {
     updatePlaybackState();
 
-    // Update waveform if we have audio
+    // Update waveform if buffer has changed (version-based to avoid redundant copies)
+    int currentVersion = processor.getBufferVersion();
+    if (currentVersion != lastBufferVersion)
+    {
+        lastBufferVersion = currentVersion;
+        juce::AudioBuffer<float> tempBuffer;
+        if (processor.copyAudioBufferTo(tempBuffer))
+            waveformDisplay.setAudioBuffer(&tempBuffer);
+        else
+            waveformDisplay.clearAudioBuffer();
+    }
+
+    // Update playback position
     if (processor.hasAudio())
     {
-        // Ensure waveform has the audio buffer (handles initial load from cache)
-        auto* buffer = processor.getAudioBuffer();
-        if (buffer != nullptr && waveformDisplay.getAudioBuffer() != buffer)
-            waveformDisplay.setAudioBuffer(buffer);
-
         double length = processor.getAudioLength();
         if (length > 0)
         {
@@ -759,7 +787,8 @@ void PluginEditor::onHistorySelectionChanged()
     int selectedIdx = historyDropdown.getSelectedId() - 1;
     if (selectedIdx >= 0 && selectedIdx < historyEntries.size())
     {
-        const auto& entry = historyEntries[selectedIdx];
+        // Copy by value to guard against array mutation during use
+        auto entry = historyEntries[selectedIdx];
 
         // Check if audio file exists
         juce::File audioFile(entry.audioFilePath);
@@ -771,7 +800,7 @@ void PluginEditor::onHistorySelectionChanged()
             errorLabel.setText("Sample missing. Regenerate?", juce::dontSendNotification);
             statusLabel.setText("", juce::dontSendNotification);
             generateButton.setButtonText("Regenerate");
-            waveformDisplay.setAudioBuffer(nullptr);
+            waveformDisplay.clearAudioBuffer();
             return;
         }
 
@@ -785,10 +814,17 @@ void PluginEditor::onHistorySelectionChanged()
         // Load the cached audio
         processor.loadAudioFromCache(entry.audioFilePath);
 
-        // Update waveform
+        // Update waveform with a safe copy of the audio buffer
         waveformDisplay.setCachedFilePath(entry.audioFilePath);
-        waveformDisplay.setAudioBuffer(processor.getAudioBuffer());
+        {
+            juce::AudioBuffer<float> tempBuffer;
+            if (processor.copyAudioBufferTo(tempBuffer))
+                waveformDisplay.setAudioBuffer(&tempBuffer);
+            else
+                waveformDisplay.clearAudioBuffer();
+        }
         waveformDisplay.setPlaybackPosition(0.0);
+        lastBufferVersion = processor.getBufferVersion();
 
         currentHistoryId = entry.id;
 
@@ -867,7 +903,7 @@ void PluginEditor::showSettingsDialog()
             // Clear cache callback
             processor.getCacheManager().clearCache();
             populateHistoryDropdown();
-            waveformDisplay.setAudioBuffer(nullptr);
+            waveformDisplay.clearAudioBuffer();
             statusLabel.setText("Cache cleared", juce::dontSendNotification);
         });
 }
@@ -893,11 +929,18 @@ void PluginEditor::handleGenerationComplete(bool success, const juce::String& er
         statusLabel.setText("Ready to play", juce::dontSendNotification);
         errorLabel.setText("", juce::dontSendNotification);
 
-        // Update waveform with new audio buffer and cached path
+        // Update waveform with a safe copy of the new audio buffer
         juce::String cachedPath = processor.getCurrentCachedPath();
         waveformDisplay.setCachedFilePath(cachedPath);
-        waveformDisplay.setAudioBuffer(processor.getAudioBuffer());
+        {
+            juce::AudioBuffer<float> tempBuffer;
+            if (processor.copyAudioBufferTo(tempBuffer))
+                waveformDisplay.setAudioBuffer(&tempBuffer);
+            else
+                waveformDisplay.clearAudioBuffer();
+        }
         waveformDisplay.setPlaybackPosition(0.0);
+        lastBufferVersion = processor.getBufferVersion();
 
         // Refresh history dropdown and select the new entry
         populateHistoryDropdown();
